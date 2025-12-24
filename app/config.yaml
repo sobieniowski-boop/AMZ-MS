@@ -1,0 +1,46 @@
+rules:
+  - id: ASK_FOR_REVIEW
+    severity: BLOCK
+    title: Asking for reviews/ratings
+    patterns:
+      - "(?i)leave (a )?review"
+      - "(?i)rate (us|me|the product)"
+      - "(?i)five\s*star"
+      - "(?i)positive review"
+      - "(?i)good review"
+  - id: OFF_PLATFORM_CONTACT
+    severity: BLOCK
+    title: Off-platform contact info
+    patterns:
+      - "(?i)email\s*me"
+      - "(?i)contact\s*me\s*at"
+      - "(?i)whatsapp"
+      - "(?i)telegram"
+      - "(?i)call\s*me"
+      - "(?i)phone\s*number"
+  - id: INCENTIVE
+    severity: BLOCK
+    title: Incentivizing actions
+    patterns:
+      - "(?i)gift\s*card"
+      - "(?i)coupon\s*for\s*a\s*review"
+      - "(?i)refund\s*if\s*you\s*leave"
+  - id: PERSONAL_DATA
+    severity: REVIEW
+    title: Requesting personal data
+    patterns:
+      - "(?i)full\s*name"
+      - "(?i)address"
+      - "(?i)bank\s*account"
+      - "(?i)credit\s*card"
+  - id: PROACTIVE_TIMING
+    severity: REVIEW
+    title: Proactive message timing risk
+    patterns:
+      - "(?i)just\s*checking\s*in"
+      - "(?i)following\s*up"
+scoring:
+  base: 100
+  penalties:
+    BLOCK: 60
+    REVIEW: 25
