@@ -195,6 +195,7 @@ def enforce_limits(db: Session, user: User) -> int:
         raise HTTPException(status_code=429, detail=f"Daily limit reached ({FREE_DAILY_LIMIT})")
     return used
 
+checks_limit = None if role == "admin" else 100
 
 # -------------------------
 # CHECK ENDPOINTS
