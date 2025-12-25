@@ -19,6 +19,13 @@ import os
 from datetime import datetime, timedelta
 from jose import jwt
 
+from fastapi import Request
+
+@app.post("/v1/check")
+async def check(payload: CheckRequest, request: Request):
+    raw = await request.body()
+    print("RAW /v1/check:", raw.decode("utf-8", errors="ignore"))
+
 ADMIN_EMAILS = {"sobieniowski@gmail.com"}
 
 JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME")
