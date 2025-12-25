@@ -14,7 +14,21 @@ from .db import engine, Base, get_db
 from .models import User, Check
 from .security import create_access_token, get_bearer_token, decode_token
 from .google_oauth import build_google_auth_url, exchange_code_for_id_token, get_profile_from_id_token
+import os
+from datetime import datetime, timedelta
+from jose import jwt
 
+ADMIN_EMAILS = {"sobieniowski@gmail.com"}
+
+JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME")
+JWT_ALG = "HS256"
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))  # 7 dni
+
+def create_access_token(sub: str, role: str) -> str:
+    now = datetime.utcnow()
+    exp = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    payload = {"sub": sub, "role": role, "iat": int(now.timestamp()), "exp": exp}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 APP_NAME = "Amazon Comms Compliance Checker"
 ADMIN_EMAIL = (os.getenv("ADMIN_EMAIL", "") or "").strip().lower()
@@ -29,10 +43,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-ADMIN_EMAILS = {
-    "sobieniowski@gmail.com"
-}
 
 
 @app.on_event("startup")
