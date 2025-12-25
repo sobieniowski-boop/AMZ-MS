@@ -1,45 +1,31 @@
 import os
 import json
 from datetime import datetime, date
-from typing import Optional, Any
+from typing import Optional
 
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-import httpx
-from fastapi.responses import RedirectResponse, HTMLResponse
+
+from pydantic import BaseModel, Field
 
 from .db import engine, Base, get_db
 from .models import User, Check
 from .security import create_access_token, get_bearer_token, decode_token
-from .google_oauth import build_google_auth_url, exchange_code_for_id_token, get_profile_from_id_token
-import os
-from datetime import datetime, timedelta
-from jose import jwt
-
-from fastapi import Request
-
-@app.post("/v1/check")
-async def check(payload: CheckRequest, request: Request):
-    raw = await request.body()
-    print("RAW /v1/check:", raw.decode("utf-8", errors="ignore"))
-
-ADMIN_EMAILS = {"sobieniowski@gmail.com"}
-
-JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME")
-JWT_ALG = "HS256"
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))  # 7 dni
-
-def create_access_token(sub: str, role: str) -> str:
-    now = datetime.utcnow()
-    exp = now + timedelta(minutes=JWT_EXPIRE_MINUTES)
-    payload = {"sub": sub, "role": role, "iat": int(now.timestamp()), "exp": exp}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+from .google_oauth import (
+    build_google_auth_url,
+    exchange_code_for_id_token,
+    get_profile_from_id_token,
+)
 
 APP_NAME = "Amazon Comms Compliance Checker"
-ADMIN_EMAIL = (os.getenv("ADMIN_EMAIL", "") or "").strip().lower()
+
+# Admin whitelist (Twoje konto no-limit)
+ADMIN_EMAILS = {"sobieniowski@gmail.com"}
+
 FREE_DAILY_LIMIT = int(os.getenv("FREE_DAILY_LIMIT", "50"))
 
 app = FastAPI(title=APP_NAME)
@@ -59,19 +45,54 @@ def on_startup():
 
 
 # -------------------------
+# API MODELS (Pydantic)
+# -------------------------
+
+class CheckRequest(BaseModel):
+    marketplace: str = Field(default="DE")
+    message: str
+    proactive: bool = False
+    days_since_completion: int = 0
+    order_id: Optional[str] = None
+    store_message: bool = False  # jeśli true, zapis do historii (wymaga loginu)
+
+
+class CheckResponse(BaseModel):
+    ok: bool
+    result: dict
+    used_today: int
+    limit_today: int
+    role: str
+
+
+# -------------------------
 # AUTH HELPERS
 # -------------------------
+
+def ensure_admin_if_email(user: User) -> None:
+    if user.email and user.email.lower() in ADMIN_EMAILS:
+        user.role = "admin"
+
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     token = get_bearer_token(request)
     payload = decode_token(token)
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
 
-    user = db.get(User, user_id)
+    sub = payload.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Invalid token payload (missing sub)")
+
+    # W tej wersji przyjmujemy, że sub=User.id (int/str) — to zależy od Twojego security.py
+    # Jeśli u Ciebie create_access_token daje sub=user.id, to db.get(User, sub) zadziała.
+    # Jeśli daje sub=email, to trzeba query po email.
+    user = db.get(User, sub)
+    if not user:
+        # fallback: spróbuj po email jeśli sub jest mailem
+        user = db.query(User).filter(User.email == str(sub).lower()).first()
+
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+
     return user
 
 
@@ -80,10 +101,6 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
         raise HTTPException(status_code=403, detail="Admin only")
     return user
 
-
-def ensure_admin_if_email(user: User) -> None:
-    if ADMIN_EMAIL and user.email.lower() == ADMIN_EMAIL:
-        user.role = "admin"
 
 # -------------------------
 # CHECKER LOGIC (placeholder)
@@ -95,10 +112,10 @@ PROHIBITED = [
     "zadzwoń", "przelew", "paypal", "poza amazon"
 ]
 
+
 def run_checks(message: str, proactive: bool, marketplace: str) -> dict:
     txt = (message or "").strip()
     lower = txt.lower()
-
     hits = [w for w in PROHIBITED if w in lower]
 
     if hits:
@@ -118,122 +135,34 @@ def run_checks(message: str, proactive: bool, marketplace: str) -> dict:
 
 
 # -------------------------
-# API MODELS (Pydantic)
+# LIMITS
 # -------------------------
 
-from pydantic import BaseModel, Field
+def count_used_today(db: Session, user_id) -> int:
+    today = date.today()
+    return (
+        db.query(func.count(Check.id))
+        .filter(Check.user_id == user_id)
+        .filter(func.date(Check.created_at) == today)
+        .scalar()
+    ) or 0
 
-class CheckRequest(BaseModel):
-    marketplace: str = Field("DE")
-    message: str
-    proactive: bool = False
-    days_since_completion: int = 0
-    order_id: Optional[str] = None
-    store_message: bool = False  # jeśli true, zapis do historii (wymaga loginu)
 
-class CheckResponse(BaseModel):
-    ok: bool
-    result: dict
-    used_today: int
-    limit_today: int
-    role: str
+def enforce_limits(db: Session, user: User) -> int:
+    if user.role == "admin":
+        return 0
+    used = count_used_today(db, user.id)
+    if used >= FREE_DAILY_LIMIT:
+        raise HTTPException(status_code=429, detail=f"Daily limit reached ({FREE_DAILY_LIMIT})")
+    return used
 
 
 # -------------------------
-# GOOGLE OAUTH ENDPOINTS
+# GOOGLE OAUTH (JEDNA WERSJA)
 # -------------------------
-
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
-
-@ app.get("/auth/google/login")
-def google_login():
-    # klasyczny flow: redirect do Google consent screen
-    if not (GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI):
-        return HTMLResponse("Missing GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URI", status_code=500)
-
-    params = {
-        "client_id": GOOGLE_CLIENT_ID,
-        "redirect_uri": GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope": "openid email profile",
-        "access_type": "offline",
-        "prompt": "consent",
-    }
-    url = "https://accounts.google.com/o/oauth2/v2/auth"
-    qs = "&".join([f"{k}={httpx.QueryParams({k:v})[k]}" for k, v in params.items()])
-    return RedirectResponse(f"{url}?{qs}", status_code=302)
-
-
-@ app.get("/auth/google/callback")
-async def google_callback(code: str, db=Depends(get_db)):
-    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI):
-        return HTMLResponse("Missing GOOGLE OAuth envs", status_code=500)
-
-    # 1) wymień code na tokeny
-    async with httpx.AsyncClient(timeout=20) as client:
-        token_res = await client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "code": code,
-                "grant_type": "authorization_code",
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        token_res.raise_for_status()
-        token_json = token_res.json()
-
-        id_token = token_json.get("id_token")
-        if not id_token:
-            return HTMLResponse("No id_token from Google", status_code=400)
-
-        # 2) zweryfikuj id_token przez tokeninfo
-        info_res = await client.get(
-            "https://oauth2.googleapis.com/tokeninfo",
-            params={"id_token": id_token},
-        )
-        info_res.raise_for_status()
-        info = info_res.json()
-
-    email = info.get("email")
-    aud = info.get("aud")
-    if not email:
-        return HTMLResponse("No email in Google token", status_code=400)
-    if aud != GOOGLE_CLIENT_ID:
-        return HTMLResponse("Invalid audience", status_code=400)
-
-    # 3) user w DB + rola admin
-    role = "admin" if email.lower() in ADMIN_EMAILS else "user"
-
-    user = db.query(User).filter(User.email == email.lower()).first()
-    if not user:
-        user = User(email=email.lower(), provider="google", role=role)
-        # jeżeli masz pola limitów:
-        # user.checks_limit = None if role == "admin" else 100
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    else:
-        # dociągnij admin jeśli trafił na whitelistę
-        if role == "admin" and user.role != "admin":
-            user.role = "admin"
-            # user.checks_limit = None
-            db.commit()
-
-    # 4) nasz JWT
-    access_token = create_access_token(sub=user.email, role=user.role)
-
-    # 5) redirect do frontu z tokenem w query
-    # Zakładam, że front jest na "/" tej samej domeny
-    return RedirectResponse(url=f"/?token={access_token}", status_code=302)
 
 @app.get("/auth/google/start")
 def google_start():
-    # state można rozbudować (CSRF). Na MVP dajemy prosty stały.
     url = build_google_auth_url(state="amz-msg-checker")
     return RedirectResponse(url, status_code=302)
 
@@ -242,6 +171,7 @@ def google_start():
 async def google_callback(code: str, state: str = "", db: Session = Depends(get_db)):
     # 1) code -> id_token
     id_token = await exchange_code_for_id_token(code)
+
     # 2) id_token -> profile
     profile = await get_profile_from_id_token(id_token)
 
@@ -263,55 +193,38 @@ async def google_callback(code: str, state: str = "", db: Session = Depends(get_
         db.commit()
         db.refresh(user)
     else:
-        # uzupełnij google_sub jeśli brak
-        if not user.google_sub:
+        if not getattr(user, "google_sub", None):
             user.google_sub = sub
         ensure_admin_if_email(user)
         db.commit()
+        db.refresh(user)
 
     # 4) issue JWT
-    token = create_access_token(user.id, user.email, user.role)
+    # UWAGA: security.py u Ciebie prawdopodobnie ma sygnaturę:
+    # create_access_token(sub: str|int, email: str, role: str) albo create_access_token(sub: str|int, role: str)
+    # Ponieważ w Twoim logu wcześniej było "create_access_token(user.id, user.email, user.role)"
+    # to robimy to tak:
+    try:
+        token = create_access_token(user.id, user.email, user.role)
+    except TypeError:
+        # fallback jeśli masz prostszą sygnaturę
+        token = create_access_token(str(user.id), user.role)
 
-
-    # 5) redirect back to app with token in URL (front zapisze do localStorage)
+    # 5) redirect back with token
     return RedirectResponse(url=f"/?token={token}", status_code=302)
 
-role = "admin" if email in ADMIN_EMAILS else "user"
-
-
-# -------------------------
-# LIMITS
-# -------------------------
-
-def count_used_today(db: Session, user_id: str) -> int:
-    today = date.today()
-    # created_at >= today 00:00
-    return (
-        db.query(func.count(Check.id))
-        .filter(Check.user_id == user_id)
-        .filter(func.date(Check.created_at) == today)
-        .scalar()
-    ) or 0
-
-
-def enforce_limits(db: Session, user: User) -> int:
-    if user.role == "admin":
-        return 0
-    used = count_used_today(db, user.id)
-    if used >= FREE_DAILY_LIMIT:
-        raise HTTPException(status_code=429, detail=f"Daily limit reached ({FREE_DAILY_LIMIT})")
-    return used
-
-checks_limit = None if role == "admin" else 100
 
 # -------------------------
 # CHECK ENDPOINTS
 # -------------------------
 
 @app.post("/v1/check", response_model=CheckResponse)
-def demo_check(req: CheckRequest, db: Session = Depends(get_db)):
-    # demo: bez logowania, bez zapisu
-    if not req.message.strip():
+async def demo_check(req: CheckRequest, request: Request):
+    # log payload (żebyś widział co leci z frontu)
+    raw = await request.body()
+    print("RAW /v1/check:", raw.decode("utf-8", errors="ignore"))
+
+    if not (req.message or "").strip():
         raise HTTPException(status_code=422, detail="message is required")
 
     result = run_checks(req.message, req.proactive, req.marketplace)
@@ -320,14 +233,13 @@ def demo_check(req: CheckRequest, db: Session = Depends(get_db)):
 
 @app.post("/v1/checks", response_model=CheckResponse)
 def user_check(req: CheckRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if not req.message.strip():
+    if not (req.message or "").strip():
         raise HTTPException(status_code=422, detail="message is required")
 
     used_before = enforce_limits(db, user)
 
     result = run_checks(req.message, req.proactive, req.marketplace)
 
-    # zapis checka zawsze (bo to usage); treść tylko jako preview (bezpieczniej)
     preview = req.message[:500] if req.store_message else None
 
     chk = Check(
@@ -351,7 +263,7 @@ def user_check(req: CheckRequest, user: User = Depends(get_current_user), db: Se
 
 
 # -------------------------
-# ADMIN (minimal)
+# ADMIN
 # -------------------------
 
 @app.get("/admin/users")
@@ -359,7 +271,13 @@ def admin_users(admin: User = Depends(require_admin), db: Session = Depends(get_
     users = db.query(User).order_by(User.created_at.desc()).limit(200).all()
     return {
         "items": [
-            {"id": u.id, "email": u.email, "role": u.role, "plan": u.plan, "created_at": u.created_at.isoformat()}
+            {
+                "id": u.id,
+                "email": u.email,
+                "role": u.role,
+                "plan": getattr(u, "plan", None),
+                "created_at": u.created_at.isoformat() if getattr(u, "created_at", None) else None,
+            }
             for u in users
         ]
     }
@@ -371,7 +289,9 @@ def admin_users(admin: User = Depends(require_admin), db: Session = Depends(get_
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return """<!doctype html>
+    admin_hint = ", ".join(sorted(ADMIN_EMAILS)) if ADMIN_EMAILS else "not set"
+
+    return f"""<!doctype html>
 <html lang="pl">
 <head>
   <meta charset="utf-8" />
@@ -397,7 +317,7 @@ def index():
   <div style="color:#555;margin-bottom:14px">
     <span class="pill">DEMO: /v1/check</span>
     <span class="pill">LOGGED: /v1/checks</span>
-    <span class="pill">Admin no-limit: {ADMIN_EMAIL or "not set"}</span>
+    <span class="pill">Admin no-limit: {admin_hint}</span>
   </div>
 
   <div class="card">
@@ -469,19 +389,6 @@ def index():
 </div>
 
 <script>
-  const urlParams = new URLSearchParams(window.location.search);
-  const token = urlParams.get("token");
-  if (token) {
-    localStorage.setItem("token", token);
-    window.history.replaceState({}, document.title, window.location.pathname);
-  }
-
-  function getToken() {
-    return localStorage.getItem("token");
-  }
-</script>
-
-<script>
   function setAuthOut(obj) {{
     document.getElementById("authOut").textContent = JSON.stringify(obj, null, 2);
   }}
@@ -489,9 +396,9 @@ def index():
     document.getElementById("out").textContent = JSON.stringify(obj, null, 2);
   }}
 
-  function getToken() {
-  return localStorage.getItem("token");
-}
+  function getToken() {{
+    return localStorage.getItem("token");
+  }}
   function setToken(t) {{
     if (t) localStorage.setItem("token", t);
   }}
