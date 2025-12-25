@@ -78,6 +78,15 @@ def ensure_admin_if_email(user: User) -> None:
     if ADMIN_EMAIL and user.email.lower() == ADMIN_EMAIL:
         user.role = "admin"
 
+// jeśli backend zrobi redirect na "/?token=...."
+const urlParams = new URLSearchParams(window.location.search);
+const token = urlParams.get("token");
+if (token) {
+  localStorage.setItem("token", token);
+  // wyczyść token z URL, żeby nie wisiał w historii
+  window.history.replaceState({}, document.title, window.location.pathname);
+}
+
 
 # -------------------------
 # CHECKER LOGIC (placeholder)
