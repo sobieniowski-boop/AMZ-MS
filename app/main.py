@@ -364,7 +364,7 @@ def admin_users(admin: User = Depends(require_admin), db: Session = Depends(get_
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return f"""<!doctype html>
+    return """<!doctype html>
 <html lang="pl">
 <head>
   <meta charset="utf-8" />
