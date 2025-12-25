@@ -29,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ADMIN_EMAIL = {
+ADMIN_EMAILS = {
     "sobieniowski@gmail.com"
 }
 
@@ -168,6 +168,8 @@ async def google_callback(code: str, state: str = "", db: Session = Depends(get_
 
     # 5) redirect back to app with token in URL (front zapisze do localStorage)
     return RedirectResponse(url=f"/?token={token}", status_code=302)
+
+role = "admin" if email in ADMIN_EMAILS else "user"
 
 
 # -------------------------
