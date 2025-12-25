@@ -275,6 +275,7 @@ async def google_callback(code: str, state: str = "", db: Session = Depends(get_
     # 4) issue JWT
     token = create_access_token(user.id, user.email, user.role)
 
+
     # 5) redirect back to app with token in URL (front zapisze do localStorage)
     return RedirectResponse(url=f"/?token={token}", status_code=302)
 
@@ -478,9 +479,9 @@ def index():
     document.getElementById("out").textContent = JSON.stringify(obj, null, 2);
   }}
 
-  function getToken() {{
-    return localStorage.getItem("token") || "";
-  }}
+  function getToken() {
+  return localStorage.getItem("token");
+}
   function setToken(t) {{
     if (t) localStorage.setItem("token", t);
   }}
