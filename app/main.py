@@ -29,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ADMIN_EMAILS = {
+ADMIN_EMAIL = {
     "sobieniowski@gmail.com"
 }
 
