@@ -7,7 +7,7 @@ from typing import Optional, List
 import time
 import os
 import hashlib
-import jwt
+from jose import jwt
 
 # =========================
 # CONFIG
