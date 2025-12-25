@@ -137,6 +137,94 @@ class CheckResponse(BaseModel):
 # GOOGLE OAUTH ENDPOINTS
 # -------------------------
 
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+
+@ app.get("/auth/google/login")
+def google_login():
+    # klasyczny flow: redirect do Google consent screen
+    if not (GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URI):
+        return HTMLResponse("Missing GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URI", status_code=500)
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    url = "https://accounts.google.com/o/oauth2/v2/auth"
+    qs = "&".join([f"{k}={httpx.QueryParams({k:v})[k]}" for k, v in params.items()])
+    return RedirectResponse(f"{url}?{qs}", status_code=302)
+
+
+@ app.get("/auth/google/callback")
+async def google_callback(code: str, db=Depends(get_db)):
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GOOGLE_REDIRECT_URI):
+        return HTMLResponse("Missing GOOGLE OAuth envs", status_code=500)
+
+    # 1) wymień code na tokeny
+    async with httpx.AsyncClient(timeout=20) as client:
+        token_res = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": GOOGLE_REDIRECT_URI,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        token_res.raise_for_status()
+        token_json = token_res.json()
+
+        id_token = token_json.get("id_token")
+        if not id_token:
+            return HTMLResponse("No id_token from Google", status_code=400)
+
+        # 2) zweryfikuj id_token przez tokeninfo
+        info_res = await client.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": id_token},
+        )
+        info_res.raise_for_status()
+        info = info_res.json()
+
+    email = info.get("email")
+    aud = info.get("aud")
+    if not email:
+        return HTMLResponse("No email in Google token", status_code=400)
+    if aud != GOOGLE_CLIENT_ID:
+        return HTMLResponse("Invalid audience", status_code=400)
+
+    # 3) user w DB + rola admin
+    role = "admin" if email.lower() in ADMIN_EMAILS else "user"
+
+    user = db.query(User).filter(User.email == email.lower()).first()
+    if not user:
+        user = User(email=email.lower(), provider="google", role=role)
+        # jeżeli masz pola limitów:
+        # user.checks_limit = None if role == "admin" else 100
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        # dociągnij admin jeśli trafił na whitelistę
+        if role == "admin" and user.role != "admin":
+            user.role = "admin"
+            # user.checks_limit = None
+            db.commit()
+
+    # 4) nasz JWT
+    access_token = create_access_token(sub=user.email, role=user.role)
+
+    # 5) redirect do frontu z tokenem w query
+    # Zakładam, że front jest na "/" tej samej domeny
+    return RedirectResponse(url=f"/?token={access_token}", status_code=302)
+
 @app.get("/auth/google/start")
 def google_start():
     # state można rozbudować (CSRF). Na MVP dajemy prosty stały.
